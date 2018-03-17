@@ -55,7 +55,7 @@ func (r IPRange) Contains(ip IP) bool {
 
 func Fast(inRdr io.Reader, out io.Writer, networks []string) {
 	type ResultRow struct {
-		Line string
+		Line []byte
 		Pos  int
 	}
 	var (
@@ -123,7 +123,7 @@ func Fast(inRdr io.Reader, out io.Writer, networks []string) {
 				email := bytes.Replace(in.Email, []byte(`@`), []byte(` [at] `), 1)
 
 				var resultRow ResultRow
-				resultRow.Line = fmt.Sprintf("[%d] %s <%s>", userId, in.Name, email)
+				resultRow.Line = []byte(fmt.Sprintf("[%d] %s <%s>\n", userId, in.Name, email))
 				resultRow.Pos = userId
 
 				resultsMu.Lock()
@@ -146,7 +146,7 @@ func Fast(inRdr io.Reader, out io.Writer, networks []string) {
 	})
 
 	for _, result := range results {
-		fmt.Fprintln(out, result.Line)
+		out.Write(result.Line)
 	}
 }
 
