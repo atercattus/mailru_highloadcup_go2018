@@ -1,14 +1,16 @@
 package main
 
-// заменил json на свой парсер
+// распараллелил и чуть потюнил
 
 import (
-	"bufio"
 	"bytes"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"regexp"
+	"sort"
 	"strconv"
+	"sync"
 )
 
 const (
@@ -19,8 +21,9 @@ const (
 type (
 	IP      uint32
 	IPRange struct {
-		IP   IP
-		Mask IP
+		IP       IP
+		IPMasked IP
+		Mask     IP
 	}
 
 	InMy struct {
@@ -36,36 +39,53 @@ func (ip IP) String() string {
 }
 
 func (r IPRange) Contains(ip IP) bool {
-	return r.IP&r.Mask == ip&r.Mask
+	return r.IPMasked == ip&r.Mask
 }
 
 func Fast(inRdr io.Reader, out io.Writer, networks []string) {
+	type ResultRow struct {
+		Line string
+		Pos  int
+	}
 	var (
 		userAgentRe = regexp.MustCompile(`Chrome/(60.0.3112.90|52.0.2743.116|57.0.2987.133)`)
-		results     []string
+		results     []ResultRow
+		resultsMu   sync.Mutex
 	)
 
 	var netParsed = parseNetworksMy(networks)
 
-	inRdrBuf := bufio.NewReader(inRdr)
-	for userId := 1; ; userId++ {
-		if line, _, err := inRdrBuf.ReadLine(); err != nil { // можно параллелиться по строкам?
-			break
-		} else {
+	var wg sync.WaitGroup
+
+	buf, _ := ioutil.ReadAll(inRdr)
+	bufPos := 0
+
+	userId := 1
+	for bufPos < len(buf) {
+		nPos := bytes.IndexByte(buf[bufPos:], '\n')
+		if nPos == -1 {
+			nPos = len(buf) - 1
+		}
+
+		line := buf[bufPos : bufPos+nPos]
+		bufPos += nPos + 1
+
+		wg.Add(1)
+		go func(userId int, line []byte) {
 			hitsCnt := 0
 			browsersCnt := 0
 
 			ch := jsonPipe(line)
 
 			for in := range ch {
-			hitsLoop:
+			loop:
 				for _, hit := range in.Hits {
 					hitIP, _ := parseIP(string(hit))
 
 					for _, network := range netParsed {
 						if !network.Contains(hitIP) {
 						} else if hitsCnt++; hitsCnt >= hitsThresh {
-							break hitsLoop
+							break loop
 						}
 					}
 				}
@@ -83,14 +103,31 @@ func Fast(inRdr io.Reader, out io.Writer, networks []string) {
 
 				email := bytes.Replace(in.Email, []byte(`@`), []byte(` [at] `), 1)
 
-				results = append(results, fmt.Sprintf("[%d] %s <%s>", userId, in.Name, email))
+				var resultRow ResultRow
+				resultRow.Line = fmt.Sprintf("[%d] %s <%s>", userId, in.Name, email)
+				resultRow.Pos = userId
+
+				resultsMu.Lock()
+				results = append(results, resultRow)
+				resultsMu.Unlock()
 			}
-		}
+
+			wg.Done()
+		}(userId, line)
+
+		userId++
 	}
 
+	wg.Wait()
+
 	fmt.Fprintf(out, "Total: %d\n", len(results))
+
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Pos < results[j].Pos
+	})
+
 	for _, result := range results {
-		fmt.Fprintln(out, result)
+		fmt.Fprintln(out, result.Line)
 	}
 }
 
@@ -128,6 +165,7 @@ func parseNetworksMy(netRaw []string) (netParsed []IPRange) {
 
 		ipR.IP = ip
 		ipR.Mask = IP(0xFFFFFFFF << (32 - mask))
+		ipR.IPMasked = ipR.IP & ipR.Mask
 
 		netParsed[i] = ipR
 	}
