@@ -1,7 +1,6 @@
 package main
 
-// распараллелил и чуть потюнил
-// BenchmarkFast-4   	   20000	   4511407 ns/op	 2027802 B/op	    2616 allocs/op
+// еще тюнинг
 
 import (
 	"bytes"
@@ -33,6 +32,17 @@ type (
 		Name     []byte
 		Email    []byte
 	}
+
+	JsonPiper struct {
+		strBrowsers []byte
+		strCompany  []byte
+		strCountry  []byte
+		strEmail    []byte
+		strHits     []byte
+		strJob      []byte
+		strName     []byte
+		strPhone    []byte
+	}
 )
 
 func (ip IP) String() string {
@@ -61,6 +71,9 @@ func Fast(inRdr io.Reader, out io.Writer, networks []string) {
 	buf, _ := ioutil.ReadAll(inRdr)
 	bufPos := 0
 
+	var jp JsonPiper
+	jp.init()
+
 	userId := 1
 	for bufPos < len(buf) {
 		nPos := bytes.IndexByte(buf[bufPos:], '\n')
@@ -76,9 +89,14 @@ func Fast(inRdr io.Reader, out io.Writer, networks []string) {
 			hitsCnt := 0
 			browsersCnt := 0
 
-			ch := jsonPipe(line)
+			jsonPipe := jp.setupScanner(line)
 
-			for in := range ch {
+			var in InMy
+			for {
+				if !jsonPipe(&in) {
+					break
+				}
+
 			loop:
 				for _, hit := range in.Hits {
 					hitIP, _ := parseIP(string(hit))
@@ -173,100 +191,100 @@ func parseNetworksMy(netRaw []string) (netParsed []IPRange) {
 	return
 }
 
+func (jp *JsonPiper) init() {
+	jp.strBrowsers = []byte(`browsers`)
+	jp.strCompany = []byte(`company`)
+	jp.strCountry = []byte(`country`)
+	jp.strEmail = []byte(`email`)
+	jp.strHits = []byte(`hits`)
+	jp.strJob = []byte(`job`)
+	jp.strName = []byte(`name`)
+	jp.strPhone = []byte(`phone`)
+}
+
 // {"browsers":["foo",..],"company":"Tavu","country":"Albania","email":"tHall@Fiveclub.edu","hits":["151.62.127.96",...],"job":"Staff Scientist","name":"Billy Stephens","phone":"508-76-84"}
-func jsonPipe(js []byte) (ch chan *InMy) {
-	ch = make(chan *InMy, 100)
+func (jp *JsonPiper) setupScanner(js []byte) func(in *InMy) bool {
+	var pos int
 
-	go func() {
-		var pos int
-
-		checkCh := func(want byte) (c byte) {
-			c = js[pos]
-			pos++
-			if c != want {
-				panic(`checkCh. want:` + string(want) + ` got:` + string(c))
-			}
-			return
+	checkCh := func(want byte) (c byte) {
+		c = js[pos]
+		pos++
+		if c != want {
+			panic(`checkCh. want:` + string(want) + ` got:` + string(c))
 		}
+		return
+	}
 
-		getCh := func() (c byte) {
-			c = js[pos]
-			pos++
-			return
-		}
+	getCh := func() (c byte) {
+		c = js[pos]
+		pos++
+		return
+	}
 
-		fetchString := func() []byte {
-			checkCh('"')
+	fetchString := func() []byte {
+		checkCh('"')
 
-			p := bytes.IndexByte(js[pos:], '"')
-			s := js[pos : pos+p]
-			pos += p + 1
+		p := bytes.IndexByte(js[pos:], '"')
+		s := js[pos : pos+p]
+		pos += p + 1
 
-			return s
-		}
+		return s
+	}
 
-		fetchSliceOfStrings := func() (slice [][]byte) {
-			checkCh('[')
-			for {
-				slice = append(slice, fetchString())
-				c := getCh()
-				if c == ']' {
-					break
-				} else if c == ',' {
-				} else {
-					panic(`fetchSliceOfStrings`)
-				}
-			}
-			return
-		}
-
-		checkCh('{')
-
-	loop:
+	fetchSliceOfStrings := func() (slice [][]byte) {
+		checkCh('[')
 		for {
-			in := &InMy{}
+			slice = append(slice, fetchString())
+			c := getCh()
+			if c == ']' {
+				break
+			} else if c == ',' {
+			} else {
+				panic(`fetchSliceOfStrings`)
+			}
+		}
+		return
+	}
 
-			for {
-				if pos >= len(js) {
-					break loop
-				}
-				section := fetchString()
-				checkCh(':')
+	checkCh('{')
 
-				if bytes.Equal(section, []byte(`browsers`)) {
-					in.Browsers = fetchSliceOfStrings()
-				} else if bytes.Equal(section, []byte(`company`)) {
-					fetchString()
-				} else if bytes.Equal(section, []byte(`country`)) {
-					fetchString()
-				} else if bytes.Equal(section, []byte(`email`)) {
-					in.Email = fetchString()
-				} else if bytes.Equal(section, []byte(`hits`)) {
-					in.Hits = fetchSliceOfStrings()
-				} else if bytes.Equal(section, []byte(`job`)) {
-					fetchString()
-				} else if bytes.Equal(section, []byte(`name`)) {
-					in.Name = fetchString()
-				} else if bytes.Equal(section, []byte(`phone`)) {
-					fetchString()
-				} else {
-					panic(`Unknown section: ` + string(section))
-				}
+	return func(in *InMy) bool {
+		for {
+			if pos >= len(js) {
+				return false
+			}
+			section := fetchString()
+			checkCh(':')
 
-				c := getCh()
-				if c == ',' {
-				} else if c == '}' {
-					break
-				} else {
-					panic(`WTF end:` + string(c))
-				}
+			if bytes.Equal(section, jp.strBrowsers) {
+				in.Browsers = fetchSliceOfStrings()
+			} else if bytes.Equal(section, jp.strCompany) {
+				fetchString()
+			} else if bytes.Equal(section, jp.strCountry) {
+				fetchString()
+			} else if bytes.Equal(section, jp.strEmail) {
+				in.Email = fetchString()
+			} else if bytes.Equal(section, jp.strHits) {
+				in.Hits = fetchSliceOfStrings()
+			} else if bytes.Equal(section, jp.strJob) {
+				fetchString()
+			} else if bytes.Equal(section, jp.strName) {
+				in.Name = fetchString()
+			} else if bytes.Equal(section, jp.strPhone) {
+				fetchString()
+			} else {
+				panic(`Unknown section: ` + string(section))
 			}
 
-			ch <- in
+			c := getCh()
+			if c == ',' {
+			} else if c == '}' {
+				break
+			} else {
+				panic(`WTF end:` + string(c))
+			}
 		}
 
-		close(ch)
-	}()
-
-	return
+		return true
+	}
 }
