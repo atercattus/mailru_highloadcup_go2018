@@ -1,17 +1,14 @@
 package main
 
-// немного срезал аллокаций
+// заменил json на свой парсер
 
 import (
 	"bufio"
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"regexp"
 	"strconv"
-	"strings"
 )
 
 const (
@@ -19,65 +16,75 @@ const (
 	browsersThresh = 3
 )
 
-type In struct {
-	Browsers []json.RawMessage
-	//Country  json.RawMessage
-	Email json.RawMessage
-	Hits  []json.RawMessage
-	//Job      json.RawMessage
-	Name json.RawMessage
-	//Phone    json.RawMessage
+type (
+	IP      uint32
+	IPRange struct {
+		IP   IP
+		Mask IP
+	}
+
+	InMy struct {
+		Browsers [][]byte
+		Hits     [][]byte
+		Name     []byte
+		Email    []byte
+	}
+)
+
+func (ip IP) String() string {
+	return fmt.Sprintf(`%d.%d.%d.%d`, ip>>24, (ip>>16)&0xFF, (ip>>8)&0xFF, ip&0xFF)
+}
+
+func (r IPRange) Contains(ip IP) bool {
+	return r.IP&r.Mask == ip&r.Mask
 }
 
 func Fast(inRdr io.Reader, out io.Writer, networks []string) {
 	var (
 		userAgentRe = regexp.MustCompile(`Chrome/(60.0.3112.90|52.0.2743.116|57.0.2987.133)`)
 		results     []string
-		in          In
 	)
 
-	var netParsed = parseNetworks(networks)
+	var netParsed = parseNetworksMy(networks)
 
 	inRdrBuf := bufio.NewReader(inRdr)
 	for userId := 1; ; userId++ {
-		if line, _, err := inRdrBuf.ReadLine(); err != nil {
+		if line, _, err := inRdrBuf.ReadLine(); err != nil { // можно параллелиться по строкам?
 			break
 		} else {
-			json.Unmarshal(line, &in)
-
 			hitsCnt := 0
-
-		hitsLoop:
-			for _, hit := range in.Hits {
-				hitIP := net.ParseIP(string(hit[1 : len(hit)-1]))
-
-				for _, network := range netParsed {
-					if !network.Contains(hitIP) {
-					} else if hitsCnt++; hitsCnt >= hitsThresh {
-						break hitsLoop
-					}
-				}
-			}
-
 			browsersCnt := 0
 
-			for _, browser := range in.Browsers {
-				if !userAgentRe.Match(browser) {
-				} else if browsersCnt++; browsersCnt >= browsersThresh {
-					break
+			ch := jsonPipe(line)
+
+			for in := range ch {
+			hitsLoop:
+				for _, hit := range in.Hits {
+					hitIP, _ := parseIP(string(hit))
+
+					for _, network := range netParsed {
+						if !network.Contains(hitIP) {
+						} else if hitsCnt++; hitsCnt >= hitsThresh {
+							break hitsLoop
+						}
+					}
 				}
+
+				for _, browser := range in.Browsers {
+					if !userAgentRe.Match(browser) {
+					} else if browsersCnt++; browsersCnt >= browsersThresh {
+						break
+					}
+				}
+
+				if hitsCnt < hitsThresh || browsersCnt < browsersThresh {
+					continue
+				}
+
+				email := bytes.Replace(in.Email, []byte(`@`), []byte(` [at] `), 1)
+
+				results = append(results, fmt.Sprintf("[%d] %s <%s>", userId, in.Name, email))
 			}
-
-			if hitsCnt < hitsThresh || browsersCnt < browsersThresh {
-				continue
-			}
-
-			name := in.Name[1 : len(in.Name)-1]
-
-			email := in.Email[1 : len(in.Email)-1]
-			email = bytes.Replace(email, []byte(`@`), []byte(` [at] `), 1)
-
-			results = append(results, fmt.Sprintf("[%d] %s <%s>", userId, name, email))
 		}
 	}
 
@@ -87,66 +94,140 @@ func Fast(inRdr io.Reader, out io.Writer, networks []string) {
 	}
 }
 
-func parseCIDR(s string) (n net.IPNet) {
-	i := strings.IndexByte(s, '/')
-	addr, maskStr := s[:i], s[i+1:]
-	iplen := net.IPv4len
-	ip := parseIPv4(addr)
+func parseIP(s string) (ip IP, n int) {
+	var oct uint32
+	var ch byte
+	shift := uint32(24)
+	for n, ch = range []byte(s) {
+		if ch == '.' {
+			ip = ip + IP(oct<<shift)
+			oct = 0
+			shift -= 8
+		} else if ch >= '0' && ch <= '9' {
+			oct = (oct * 10) + uint32(ch-'0')
+		} else {
+			break
+		}
+	}
 
-	mask, _ := strconv.Atoi(maskStr)
-	m := net.CIDRMask(mask, 8*iplen)
+	if oct > 0 {
+		ip = ip + IP(oct)
+	}
 
-	n.IP = ip.Mask(m)
-	n.Mask = m
 	return
 }
 
-func parseIPv4(s string) net.IP {
-	var p [net.IPv4len]byte
-	for i := 0; i < net.IPv4len; i++ {
-		if len(s) == 0 {
-			// Missing octets.
-			return nil
-		}
-		if i > 0 {
-			if s[0] != '.' {
-				return nil
-			}
-			s = s[1:]
-		}
-		n, c, ok := dtoi(s)
-		if !ok || n > 0xFF {
-			return nil
-		}
-		s = s[c:]
-		p[i] = byte(n)
-	}
-	if len(s) != 0 {
-		return nil
-	}
-	return net.IPv4(p[0], p[1], p[2], p[3])
-}
+func parseNetworksMy(netRaw []string) (netParsed []IPRange) {
+	netParsed = make([]IPRange, len(netRaw))
 
-func dtoi(s string) (n int, i int, ok bool) {
-	const big = 0xFFFFFF
+	var ipR IPRange
 
-	n = 0
-	for i = 0; i < len(s) && '0' <= s[i] && s[i] <= '9'; i++ {
-		n = n*10 + int(s[i]-'0')
-		if n >= big {
-			return big, i, false
-		}
-	}
-	if i == 0 {
-		return 0, 0, false
-	}
-	return n, i, true
-}
-
-func parseNetworks(netRaw []string) (netParsed []net.IPNet) {
-	netParsed = make([]net.IPNet, len(netRaw))
 	for i, n := range netRaw {
-		netParsed[i] = parseCIDR(n)
+		ip, l := parseIP(n)
+		mask, _ := strconv.ParseUint(n[l+1:], 10, 32)
+
+		ipR.IP = ip
+		ipR.Mask = IP(0xFFFFFFFF << (32 - mask))
+
+		netParsed[i] = ipR
 	}
+	return
+}
+
+// {"browsers":["foo",..],"company":"Tavu","country":"Albania","email":"tHall@Fiveclub.edu","hits":["151.62.127.96",...],"job":"Staff Scientist","name":"Billy Stephens","phone":"508-76-84"}
+func jsonPipe(js []byte) (ch chan *InMy) {
+	ch = make(chan *InMy, 100)
+
+	go func() {
+		var pos int
+
+		checkCh := func(want byte) (c byte) {
+			c = js[pos]
+			pos++
+			if c != want {
+				panic(`checkCh. want:` + string(want) + ` got:` + string(c))
+			}
+			return
+		}
+
+		getCh := func() (c byte) {
+			c = js[pos]
+			pos++
+			return
+		}
+
+		fetchString := func() []byte {
+			checkCh('"')
+
+			p := bytes.IndexByte(js[pos:], '"')
+			s := js[pos : pos+p]
+			pos += p + 1
+
+			return s
+		}
+
+		fetchSliceOfStrings := func() (slice [][]byte) {
+			checkCh('[')
+			for {
+				slice = append(slice, fetchString())
+				c := getCh()
+				if c == ']' {
+					break
+				} else if c == ',' {
+				} else {
+					panic(`fetchSliceOfStrings`)
+				}
+			}
+			return
+		}
+
+		checkCh('{')
+
+	loop:
+		for {
+			in := &InMy{}
+
+			for {
+				if pos >= len(js) {
+					break loop
+				}
+				section := fetchString()
+				checkCh(':')
+
+				if bytes.Equal(section, []byte(`browsers`)) {
+					in.Browsers = fetchSliceOfStrings()
+				} else if bytes.Equal(section, []byte(`company`)) {
+					fetchString()
+				} else if bytes.Equal(section, []byte(`country`)) {
+					fetchString()
+				} else if bytes.Equal(section, []byte(`email`)) {
+					in.Email = fetchString()
+				} else if bytes.Equal(section, []byte(`hits`)) {
+					in.Hits = fetchSliceOfStrings()
+				} else if bytes.Equal(section, []byte(`job`)) {
+					fetchString()
+				} else if bytes.Equal(section, []byte(`name`)) {
+					in.Name = fetchString()
+				} else if bytes.Equal(section, []byte(`phone`)) {
+					fetchString()
+				} else {
+					panic(`Unknown section: ` + string(section))
+				}
+
+				c := getCh()
+				if c == ',' {
+				} else if c == '}' {
+					break
+				} else {
+					panic(`WTF end:` + string(c))
+				}
+			}
+
+			ch <- in
+		}
+
+		close(ch)
+	}()
+
 	return
 }
