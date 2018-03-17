@@ -1,6 +1,7 @@
 package main
 
 // распараллелил и чуть потюнил
+// BenchmarkFast-4   	   20000	   4511407 ns/op	 2027802 B/op	    2616 allocs/op
 
 import (
 	"bytes"
