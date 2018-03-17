@@ -1,7 +1,5 @@
 package main
 
-// еще тюнинг
-
 import (
 	"bytes"
 	"fmt"
@@ -53,6 +51,23 @@ func (r IPRange) Contains(ip IP) bool {
 	return r.IPMasked == ip&r.Mask
 }
 
+func searchIPInNetworks(ip IP, networks []IPRange) bool {
+	min, max := 0, len(networks)
+
+	for min < max {
+		medium := (min + max) / 2
+
+		if networks[medium].Contains(ip) {
+			return true
+		} else if netIP := networks[medium].IP; ip < netIP {
+			max = medium
+		} else {
+			min = medium + 1
+		}
+	}
+	return false
+}
+
 func Fast(inRdr io.Reader, out io.Writer, networks []string) {
 	type ResultRow struct {
 		Line []byte
@@ -101,12 +116,15 @@ func Fast(inRdr io.Reader, out io.Writer, networks []string) {
 				for _, hit := range in.Hits {
 					hitIP, _ := parseIP(string(hit))
 
-					for _, network := range netParsed {
-						if !network.Contains(hitIP) {
-						} else if hitsCnt++; hitsCnt >= hitsThresh {
+					if searchIPInNetworks(hitIP, netParsed) {
+						if hitsCnt++; hitsCnt >= hitsThresh {
 							break loop
 						}
 					}
+				}
+
+				if hitsCnt < hitsThresh {
+					continue
 				}
 
 				for _, browser := range in.Browsers {
@@ -116,7 +134,7 @@ func Fast(inRdr io.Reader, out io.Writer, networks []string) {
 					}
 				}
 
-				if hitsCnt < hitsThresh || browsersCnt < browsersThresh {
+				if browsersCnt < browsersThresh {
 					continue
 				}
 
@@ -188,6 +206,11 @@ func parseNetworksMy(netRaw []string) (netParsed []IPRange) {
 
 		netParsed[i] = ipR
 	}
+
+	sort.Slice(netParsed, func(i, j int) bool {
+		return netParsed[i].IP < netParsed[j].IP
+	})
+
 	return
 }
 
